@@ -89,6 +89,12 @@ python pdf2json.py
 python save_db.py
 ```
 
+### 数据库安装
+
+1. **下载PostGreSQL15.15**
+2. **创建库 & 用户**
+3. **根据vector.v0.8.0-pg15.14文件中的readme进行包的补充**
+
 ### 启动服务
 
 **方式一：API服务**
@@ -151,6 +157,7 @@ TCM_Agentic_Rag/
 ├── config.py              # 配置管理
 ├── requirements.txt       # 项目依赖
 ├── .env                   # 环境变量
+├── vector.v0.8.0-pg15.14  # pg15的vector补充包
 ├── data/                  # 数据
 │   ├── hdwj.json/         # json数据
 │   ├── test.py/           # 测试向量数据库
