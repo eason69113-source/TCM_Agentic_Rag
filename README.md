@@ -1,7 +1,8 @@
-# TCM_Agentic_Rag
-这是基于langchain1.2和langgraph开发的智能问答系统，知识库采用的是《黄帝外经》的原文和白话直译，最终实现可以成功部署上线。
-
-我来帮你写一个专业的README文件。
+![Python](https://img.shields.io/badge/Python-3.9+-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.125.0-009688)
+![Gradio](https://img.shields.io/badge/Gradio-3.50.2-orange)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Stars](https://img.shields.io/github/stars/你的ID/仓库名?style=social)
 # 《黄帝外经》智能问答系统
 
 一个基于RAG（Retrieval-Augmented Generation）技术的中医古籍智能问答系统，支持《黄帝外经》的原文检索、白话翻译和专家解读。
