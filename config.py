@@ -24,7 +24,8 @@ class Config:
     embed1 = DashScopeEmbeddings(model='text-embedding-v3', 
                                 dashscope_api_key=DASHSCOPE_API_KEY)
 
-    DB_URI = os.getenv("DB_URI", "postgresql://postgres:postgres@localhost:5432/postgres?sslmode=disable")
+    DB_URI = os.getenv("DB_URI", "postgresql://postgres:密码@localhost:5432/数据库名")
 
     HOST = "0.0.0.0"
+
     PORT = 8000
