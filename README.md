@@ -97,13 +97,13 @@ python save_db.py
 
 ### 启动服务
 
-**方式一：API服务**
+**步骤一：API服务**
 ```bash
 python main.py
 # 访问 http://localhost:8000/docs 查看API文档
 ```
 
-**方式二：Web界面**
+**步骤二：Web界面**
 ```bash
 python webUI.py
 # 访问 http://localhost:7860 使用Web界面
