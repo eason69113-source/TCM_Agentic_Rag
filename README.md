@@ -144,18 +144,21 @@ TCM_Agentic_Rag/
 ├── ancient_rag.py         # RAG核心流程
 ├── main.py                # FastAPI服务
 ├── webUI.py               # Gradio界面
+├── config.py              # 配置管理
+├── requirements.txt       # 项目依赖
+├── .env                   # 环境变量
+├── data/                  # 数据
+│   ├── hdwj.json/         # json数据
+│   ├── test.py/           # 测试向量数据库
+├── faiss_db/              # 向量数据库
+│   ├── raw/               # 原文索引
+│   ├── trans/             # 直译索引
+│   └── note/              # 解要索引
 ├── utils/                 # 工具
 │   ├── tools.py /         # 智能体工具配置
 │   ├── pdf2json.py /      # PDF处理
 │   └── save_db.py/        # 向量数据库构建
 │   └── log.py/            # 日志输出构建
-├── config.py              # 配置管理
-├── requirements.txt       # 项目依赖
-├── .env                   # 环境变量
-├── faiss_db/              # 向量数据库
-│   ├── raw/               # 原文索引
-│   ├── trans/             # 直译索引
-│   └── note/              # 解要索引
 ├── prompts/               # 提示词模板
 │   ├── prompt_template_agent.txt
 │   ├── prompt_template_grade.txt
