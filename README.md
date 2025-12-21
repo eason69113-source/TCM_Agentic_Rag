@@ -6,6 +6,9 @@
 # 《黄帝外经》智能问答系统
 
 一个基于RAG（Retrieval-Augmented Generation）技术的中医古籍智能问答系统，支持《黄帝外经》的原文检索、白话翻译和专家解读。
+<p align="center">
+  <img src="png/1.png" width="100%"/>
+</p>
 
 ## 🌟 项目特色
 
