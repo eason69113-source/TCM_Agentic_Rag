@@ -1,295 +1,400 @@
-# 导入 Gradio 库
-import gradio as gr
-# 导入 requests 库
-import requests
-# 导入 json 库
-import json
-# 导入 logging 库
-import logging
-# 导入 re 库
+from contextlib import asynccontextmanager
 import re
-# 导入 uuid 库
+import time
+from typing import List, Optional, Tuple
 import uuid
-from datetime import datetime
+import json
+import uvicorn
+from fastapi.responses import JSONResponse, StreamingResponse
+from utils.log import Logger
+from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from config import Config
+from utils.tools import ToolConfig
+from ancient_rag import (
+    create_graph,
+    save_graph_visualization,
+    ConnectionPoolError,
+    monitor_connection,
+    ConnectionPool
+)
+import sys
+from passlib.context import CryptContext
 
-# 设置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logger = Logger()
 
-url = "http://127.0.0.1:8000/v1/chat/completions"
-headers = {"Content-Type": "application/json"}
-stream_flag = False 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-users_db = {}
-user_id_map = {}
+conn_pool: ConnectionPool | None = None
 
-def generate_unique_user_id(username):
-    if username not in user_id_map:
-        user_id = str(uuid.uuid4())
-        while user_id in user_id_map.values():
-            user_id = str(uuid.uuid4())
-        user_id_map[username] = user_id
-    return user_id_map[username]
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
 
-def generate_unique_conversation_id(username):
-    return f"{username}_{uuid.uuid4()}"
+def verify_password(password: str, hash: str) -> bool:
+    return pwd_context.verify(password, hash)
 
-# ==========================================
-# 核心修改：完全适配 Gradio 3.50.2 的列表格式
-# ==========================================
-def send_message(user_message, history, user_id, conversation_id, username):
-    data = {
-        "messages": [{"role": "user", "content": user_message}],
-        "stream": stream_flag,
-        "userId": user_id,
-        "conversationId": conversation_id
-    }
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
 
-    # 【重点修正】这里必须用列表嵌套 [[user, ai]]，不能用字典！
-    # 如果 history 是 None，先初始化为空列表
-    if history is None:
-        history = []
-        
-    history = history + [[user_message, "正在生成回复..."]]
-    yield history, history, None
+class Message(BaseModel):
+    role: str
+    content: str
 
-    if username and conversation_id:
-        if not users_db[username]["conversations"][conversation_id].get("title_set", False):
-            new_title = user_message[:20] if len(user_message) > 20 else user_message
-            users_db[username]["conversations"][conversation_id]["title"] = new_title
-            users_db[username]["conversations"][conversation_id]["title_set"] = True
+class ChatCompletionRequest(BaseModel):
+    messages: List[Message]
+    stream: Optional[bool] = False
+    userId: Optional[str] = None
+    conversationId: Optional[str] = None
 
-    def format_response(full_text):
-        formatted_text = re.sub(r'<think>', '**思考过程**：\n', full_text)
-        formatted_text = re.sub(r'</think>', '\n\n**最终回复**：\n', full_text)
-        return formatted_text.strip()
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: Message
+    finish_reason: Optional[str] = None
 
-    if stream_flag:
-        assistant_response = ""
-        try:
-            with requests.post(url, headers=headers, data=json.dumps(data), stream=True) as response:
-                for line in response.iter_lines():
-                    if line:
-                        json_str = line.decode('utf-8').strip("data: ")
-                        if not json_str: continue
-                        if json_str.startswith('{') and json_str.endswith('}'):
-                            try:
-                                response_data = json.loads(json_str)
-                                if 'delta' in response_data['choices'][0]:
-                                    content = response_data['choices'][0]['delta'].get('content', '')
-                                    formatted_content = format_response(content)
-                                    assistant_response += formatted_content
-                                    # 更新最后一条记录的 AI 回复部分
-                                    history[-1][1] = assistant_response
-                                    yield history, history, None
-                                if response_data.get('choices', [{}])[0].get('finish_reason') == "stop":
-                                    break
-                            except json.JSONDecodeError:
-                                history[-1][1] = "解析错误"
-                                yield history, history, None
-                                break
-        except Exception:
-            history[-1][1] = "请求失败"
-            yield history, history, None
+class ChatCompletionResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
+    object: str = "chat.completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    choices: List[ChatCompletionChoice]
+    system_fingerprint: Optional[str] = None
 
-    else:
-        try:
-            response = requests.post(url, headers=headers, data=json.dumps(data))
-            response_json = response.json()
-            assistant_content = response_json['choices'][0]['message']['content']
-            formatted_content = format_response(assistant_content)
-            
-            # 【重点修正】更新最后一条记录的 AI 回复部分
-            history[-1][1] = formatted_content
-            yield history, history, None
-        except Exception as e:
-            history[-1][1] = f"错误: {str(e)}"
-            yield history, history, None
+def format_response(response):
+    paragraphs = re.split(r'\n{2,}', response)
+    formatted_paragraphs = []
+    # 遍历每个段落进行处理
+    for para in paragraphs:
+        # 检查段落中是否包含代码块标记
+        if '```' in para:
+            # 将段落按照```分割成多个部分，代码块和普通文本交替出现
+            parts = para.split('```')
+            for i, part in enumerate(parts):
+                # 检查当前部分的索引是否为奇数，奇数部分代表代码块
+                if i % 2 == 1:  # 这是代码块
+                    # 将代码块部分用换行符和```包围，并去除多余的空白字符
+                    parts[i] = f"\n```\n{part.strip()}\n```\n"
+            # 将分割后的部分重新组合成一个字符串
+            para = ''.join(parts)
+        else:
+            # 否则，将句子中的句点后面的空格替换为换行符，以便句子之间有明确的分隔
+            para = para.replace('. ', '.\n')
 
-# 以下辅助函数保持不变
-def register(username, password):
+        formatted_paragraphs.append(para.strip())
+    return '\n\n'.join(formatted_paragraphs)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global graph, tool_config, conn_pool
+
     try:
-        r = requests.post(
-            "http://127.0.0.1:8000/auth/register",
-            json={"username": username, "password": password},
-            timeout=5
-        )
+        llm, embed = Config.llm1, Config.embed1
+        tool_config = ToolConfig(embed=embed, llm=Config.llm2)
 
-        # 成功
-        if r.status_code == 200:
-            return "注册成功，请登录"
-
-        # 非 JSON 响应（HTML / 空）
-        if not r.headers.get("content-type", "").startswith("application/json"):
-            return f"注册失败：{r.text or '后端无响应'}"
-
-        # JSON 错误信息
-        return r.json().get("detail", "注册失败")
-
-    except requests.exceptions.ConnectionError:
-        return "无法连接后端服务（8000）"
-    except Exception as e:
-        return f"注册异常：{str(e)}"
-
-
-
-def login(username, password):
-    try:
-        r = requests.post(
-            "http://127.0.0.1:8000/auth/login",
-            json={"username": username, "password": password},
-            timeout=5
-        )
-
-        if r.status_code != 200:
-            if r.headers.get("content-type", "").startswith("application/json"):
-                return False, None, None, None, r.json().get("detail", "登录失败")
-            return False, None, None, None, "登录失败"
-
-        data = r.json()
-        user_id = data["user_id"]
-
-        conversation_id = generate_unique_conversation_id(username)
-        create_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        if username not in users_db:
-            users_db[username] = {"conversations": {}}
-
-        users_db[username]["conversations"][conversation_id] = {
-            "history": [],
-            "title": "创建新的聊天",
-            "create_time": create_time,
-            "title_set": False
+        connection_kwargs = {
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "connect_timeout": 5
         }
 
-        return True, username, user_id, conversation_id, "登录成功"
+        conn_pool = ConnectionPool(
+            conninfo=Config.DB_URI,
+            max_size=20,
+            min_size=2,
+            kwargs=connection_kwargs,
+            timeout=10
+        )
+        try:
+            conn_pool.open()
+            logger.info("数据库连接池已打开")
+            logger.debug("数据库连接池已打开")
+        except Exception as e:
+            logger.error(f"数据库连接池打开失败: {e}")
+            raise ConnectionPoolError("数据库连接池打开失败")
+        
+        monitor_thread = monitor_connection(conn_pool, interval=60)
 
-    except requests.exceptions.ConnectionError:
-        return False, None, None, None, "无法连接后端服务（8000）"
+        try:
+            graph = create_graph(conn_pool, llm, embed, tool_config)
+        except Exception as e:
+            logger.error(f"创建图失败: {e}")
+            print("错误: 创建图失败")
+            sys.exit(1)
+
+        save_graph_visualization(graph)
+
+    except ConnectionPoolError as e:
+        # 捕获连接池相关的异常
+        logger.error(f"连接池错误: {e}")
+        print(f"错误: 数据库连接池问题 - {e}")
+        sys.exit(1)
+    except RuntimeError as e:
+        # 捕获其他运行时错误
+        logger.error(f"初始化失败: {e}")
+        print(f"错误: 初始化失败 - {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        # 捕获键盘中断
+        print("\n被用户打断。再见！")
+    except Exception as e:
+        # 捕获未预期的其他异常
+        logger.error(f"未知问题: {e}")
+        print(f"错误: 发生未知错误 - {e}")
+        sys.exit(1)
+
+    yield
+
+    if conn_pool and not conn_pool.closed:
+            conn_pool.close()
+            logger.info("数据库连接池已关闭")
+
+    logger.info("服务器已关闭")
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://120.55.90.221:7860", "http://120.55.90.221:8000"],  # 允许所有来源（*）在调试阶段是最简单的，生产环境应限制为前端地址
+    allow_credentials=True,
+    allow_methods=["*"],  # 允许所有 HTTP 方法 (GET, POST, OPTIONS 等)
+    allow_headers=["*"],  # 允许所有请求头
+)
+
+async def handle_non_stream_response(user_input, graph, tool_config, config):
+
+    content = None
+    try:
+        events = graph.stream({"messages": [{"role": "user", "content": user_input}], "rewrite_count": 0}, config)
+        for event in events:
+            for value in event.values():
+                if "messages" not in value or not isinstance(value["messages"], list):
+                    logger.warning("回答中没有有效的消息")
+                    continue
+
+                last_message = value["messages"][-1]
+
+                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                    for tool_call in last_message.tool_calls:
+                        if isinstance(tool_call, dict) and "name" in tool_call:
+                            logger.info(f"调用工具: {tool_call['name']}")
+
+                    continue
+
+                if hasattr(last_message, "content"):
+                    content = last_message.content
+
+                    if hasattr(last_message, "name") and last_message.name in tool_config.get_tool_names():
+                        tool_name = last_message.name
+                        logger.info(f"工具输出[{tool_name}]: {content}")
+
+                    else:
+                        logger.info(f"最终输出：{content}")
+
+    except Exception as e:
+        logger.error(f"处理响应时发生错误: {e}")
+        print("处理响应时发生错误")
+
+    formatted_response = str(format_response(content)) if content else "没有响应"
+
+    logger.info(f"格式化输出结果：{formatted_response}")
+
+    try:
+        response = ChatCompletionResponse(
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=Message(
+                        role="assistant",
+                        content=formatted_response
+                    ),
+                    finish_reason="stop"
+                )
+            ]
+        )
+
+    except Exception as e:
+        response = ChatCompletionResponse(
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=Message(
+                        role="assistant",
+                        content="处理响应时发生错误"
+                    ),
+                    finish_reason="error"
+                )
+            ]
+        )
+
+    logger.info(f"响应结果：\n{response}")
+    return JSONResponse(content=response.model_dump())
+          
+async def handle_stream_response(user_input, graph, config):
+    """
+    处理流式响应的异步函数，生成并返回流式数据。
+
+    Args:
+        user_input (str): 用户输入的内容。
+        graph: 图对象，用于处理消息流。
+        config (dict): 配置参数，包含线程和用户标识。
+
+    Returns:
+        StreamingResponse: 流式响应对象，媒体类型为 text/event-stream。
+    """
+    async def generate_stream():
+        """
+        内部异步生成器函数，用于产生流式响应数据。
+
+        Yields:
+            str: 流式数据块，格式为 SSE (Server-Sent Events)。
+
+        Raises:
+            Exception: 流生成过程中可能抛出的异常。
+        """
+        try:
+            # 生成唯一的 chunk ID
+            chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+            # 调用 graph.stream 获取消息流
+            stream_data = graph.stream(
+                {"messages": [{"role": "user", "content": user_input}], "rewrite_count": 0},
+                config,
+                stream_mode="messages"
+            )
+            # 遍历消息流中的每个数据块
+            for message_chunk, metadata in stream_data:
+                try:
+                    # 获取当前节点名称
+                    node_name = metadata.get("langgraph_node") if metadata else None
+                    # 仅处理 generate 和 agent 节点
+                    if node_name in ["generate", "agent"]:
+                        # 获取消息内容，默认空字符串
+                        chunk = getattr(message_chunk, 'content', '')
+                        # 记录流式数据块日志
+                        logger.info(f"Streaming chunk from {node_name}: {chunk}")
+                        # 产出流式数据块
+                        yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'choices': [{'index': 0, 'delta': {'content': chunk}, 'finish_reason': None}]})}\n\n"
+                except Exception as chunk_error:
+                    # 记录单个数据块处理异常
+                    logger.error(f"Error processing stream chunk: {chunk_error}")
+                    continue
+
+            # 产出流结束标记
+            yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+        except Exception as stream_error:
+            # 记录流生成过程中的异常
+            logger.error(f"Stream generation error: {stream_error}")
+            # 产出错误提示
+            yield f"data: {json.dumps({'error': 'Stream processing failed'})}\n\n"
+
+    # 返回流式响应对象
+    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+        
+
+# 依赖注入函数，用于获取 graph 和 tool_config
+async def get_dependencies() -> Tuple[any, any]:
+    """
+    依赖注入函数，用于获取 graph 和 tool_config。
+
+    Returns:
+        Tuple: 包含 (graph, tool_config) 的元组。
+
+    Raises:
+        HTTPException: 如果 graph 或 tool_config 未初始化，则抛出 500 错误。
+    """
+    if not graph or not tool_config:
+        raise HTTPException(status_code=500, detail="Service not initialized")
+    return graph, tool_config
 
 
+@app.post("/auth/register")
+def register_user(req: RegisterRequest):
+    try:
+        with conn_pool.connection() as conn:
+            cur = conn.cursor()
 
-def new_conversation(username):
-    if username not in users_db: return "请先登录！", None
-    conversation_id = generate_unique_conversation_id(username)
-    create_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    users_db[username]["conversations"][conversation_id] = {
-        "history": [], "title": "创建新的聊天", "create_time": create_time, "title_set": False
-    }
-    return "新会话创建成功！", conversation_id
+            cur.execute(
+                "SELECT 1 FROM users WHERE username=%s",
+                (req.username,)
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="用户名已存在")
 
-def get_conversation_list(username):
-    if username not in users_db or not users_db[username]["conversations"]: return ["请选择历史会话"]
-    conv_list = []
-    for conv_id, details in users_db[username]["conversations"].items():
-        title = details.get("title", "未命名会话")
-        create_time = details.get("create_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        conv_list.append(f"{title} - {create_time}")
-    return ["请选择历史会话"] + conv_list
+            user_id = uuid.uuid4()
+            pwd_hash = hash_password(req.password)
 
-def extract_conversation_id(selected_option, username):
-    if selected_option == "请选择历史会话" or not username in users_db: return None
-    for conv_id, details in users_db[username]["conversations"].items():
-        title = details.get("title", "未命名会话")
-        create_time = details.get("create_time", "")
-        if f"{title} - {create_time}" == selected_option: return conv_id
-    return None
+            cur.execute(
+                "INSERT INTO users (id, username, password_hash) VALUES (%s, %s, %s)",
+                (user_id, req.username, pwd_hash)
+            )
 
-def load_conversation(username, selected_option):
-    if selected_option == "请选择历史会话" or not username in users_db: return []
-    conversation_id = extract_conversation_id(selected_option, username)
-    if conversation_id in users_db[username]["conversations"]:
-        return users_db[username]["conversations"][conversation_id]["history"]
-    return []
+        return {"msg": "注册成功"}
 
-# ==========================================
-# Gradio 3.50.2 界面定义
-# ==========================================
-with gr.Blocks(title="聊天助手", css="""
-    .login-container { max-width: 400px; margin: 0 auto; padding-top: 100px; }
-    .modal { position: fixed; top: 20%; left: 50%; transform: translateX(-50%); background: white; padding: 20px; max-width: 400px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); border-radius: 8px; z-index: 1000; }
-    .chat-area { padding: 20px; height: 80vh; }
-    .header { display: flex; justify-content: space-between; align-items: center; padding: 10px; }
-    .header-btn { margin-left: 10px; padding: 5px 10px; font-size: 14px; }
-""") as demo:
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"注册异常: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="注册失败")
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/auth/login")
+def login_user(req: LoginRequest):
+    try:
+        with conn_pool.connection() as conn:
+            cur = conn.cursor()
+
+            cur.execute(
+                "SELECT id, password_hash FROM users WHERE username=%s",
+                (req.username,)
+            )
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+            user_id, pwd_hash = row
+            if not verify_password(req.password, pwd_hash):
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+        return {
+            "user_id": str(user_id),
+            "username": req.username
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"登录异常: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="登录失败")
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: ChatCompletionRequest, dependencies: Tuple[any, any] = Depends(get_dependencies)):
+    try:
+        graph, tool_config = dependencies
+        if not request.messages or not request.messages[-1].content:
+            logger.info("请求消息为空，请检查输入")
+            raise HTTPException(status_code=400, detail="Messages cannot be empty or invalid")
+        user_input = request.messages[-1].content
+        logger.info(f"用户输入：{user_input}")
+
+        config = {
+            "configurable":{
+                "thread_id": f"{getattr(request, 'userId', 'unknown')}@@{getattr(request, 'conversationId', 'default')}",
+                "user_id": getattr(request, 'userId', 'unknown')
+            }
+        }
+
+        if request.stream:
+            return await handle_stream_response(user_input, graph, config)
+        return await handle_non_stream_response(user_input, graph, tool_config, config)
+
+    except Exception as e:
+        logger.error(f"处理请求时发生错误: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     
-    # 状态定义
-    logged_in = gr.State(False)
-    current_user = gr.State(None)
-    current_user_id = gr.State(None)
-    current_conversation = gr.State(None)
-    chatbot_history = gr.State([])
-    conversation_title = gr.State("创建新的聊天")
-
-    # 登录页
-    with gr.Column(visible=True, elem_classes="login-container") as login_page:
-        gr.Markdown("## 聊天助手")
-        login_username = gr.Textbox(label="用户名", placeholder="请输入用户名")
-        login_password = gr.Textbox(label="密码", placeholder="请输入密码", type="password")
-        with gr.Row():
-            login_button = gr.Button("登录", variant="primary")
-            register_button = gr.Button("注册", variant="secondary")
-        login_output = gr.Textbox(label="结果", interactive=False)
-
-    # 聊天页
-    with gr.Column(visible=False) as chat_page:
-        with gr.Row(elem_classes="header"):
-            welcome_text = gr.Markdown("### 欢迎，")
-            with gr.Row():
-                new_conv_button = gr.Button("新建会话", elem_classes="header-btn", variant="secondary")
-                history_button = gr.Button("历史会话", elem_classes="header-btn", variant="secondary")
-                logout_button = gr.Button("退出登录", elem_classes="header-btn", variant="secondary")
-
-        with gr.Column(elem_classes="chat-area"):
-            title_display = gr.Markdown("## 会话标题", elem_id="title-display")
-            chatbot = gr.Chatbot(label="聊天对话", height=450)
-            with gr.Row():
-                message = gr.Textbox(label="消息", placeholder="输入消息并按 Enter 发送", scale=8, container=False)
-                send = gr.Button("发送", scale=2)
-
-    # 弹窗定义
-    with gr.Column(visible=False, elem_classes="modal") as register_modal:
-        reg_username = gr.Textbox(label="用户名", placeholder="请输入用户名")
-        reg_password = gr.Textbox(label="密码", placeholder="请输入密码", type="password")
-        with gr.Row():
-            reg_button = gr.Button("提交注册", variant="primary")
-            close_button = gr.Button("关闭", variant="secondary")
-        reg_output = gr.Textbox(label="结果", interactive=False)
-
-    with gr.Column(visible=False, elem_classes="modal") as history_modal:
-        gr.Markdown("### 会话历史")
-        conv_dropdown = gr.Dropdown(label="选择历史会话", choices=["请选择历史会话"], value="请选择历史会话")
-        load_conv_button = gr.Button("加载会话", variant="primary")
-        close_history_button = gr.Button("关闭", variant="secondary")
-
-    # 辅助函数
-    def show_register_modal(): return gr.update(visible=True)
-    def hide_register_modal(): return gr.update(visible=False)
-    def show_history_modal(username): return gr.update(visible=True), gr.update(choices=get_conversation_list(username), value="请选择历史会话")
-    def hide_history_modal(): return gr.update(visible=False)
-    def logout(): return False, None, None, gr.update(visible=True), gr.update(visible=False), "已退出登录", [], None, [], "创建新的聊天"
-    def update_welcome_text(username): return gr.update(value=f"### 欢迎，{username}")
-    def update_title_display(title): return gr.update(value=f"## {title}")
-
-    # 事件绑定
-    register_button.click(show_register_modal, None, register_modal)
-    close_button.click(hide_register_modal, None, register_modal)
-    reg_button.click(register, [reg_username, reg_password], reg_output)
-
-    login_button.click(login, [login_username, login_password], [logged_in, current_user, current_user_id, current_conversation, login_output]).then(lambda logged: (gr.update(visible=not logged), gr.update(visible=logged)), [logged_in], [login_page, chat_page]).then(update_welcome_text, [current_user], welcome_text).then(lambda username, conv_id: users_db[username]["conversations"][conv_id]["history"] if username and conv_id else [], [current_user, current_conversation], chatbot_history).then(lambda username, conv_id: users_db[username]["conversations"][conv_id].get("title", "创建新的聊天") if username and conv_id else "创建新的聊天", [current_user, current_conversation], conversation_title).then(update_title_display, [conversation_title], title_display)
-    logout_button.click(logout, None, [logged_in, current_user, current_user_id, login_page, chat_page, login_output, chatbot, current_conversation, chatbot_history, conversation_title])
-    history_button.click(show_history_modal, [current_user], [history_modal, conv_dropdown])
-    close_history_button.click(hide_history_modal, None, history_modal)
-    new_conv_button.click(new_conversation, [current_user], [login_output, current_conversation]).then(lambda: [], None, chatbot).then(lambda: [], None, chatbot_history).then(lambda: "创建新的聊天", None, conversation_title).then(update_title_display, [conversation_title], title_display)
-    load_conv_button.click(load_conversation, [current_user, conv_dropdown], chatbot).then(lambda user, conv: extract_conversation_id(conv, user), [current_user, conv_dropdown], current_conversation).then(lambda username, conv: users_db[username]["conversations"][extract_conversation_id(conv, username)].get("title", "创建新的聊天") if username and conv else "创建新的聊天", [current_user, conv_dropdown], conversation_title).then(update_title_display, [conversation_title], title_display).then(hide_history_modal, None, history_modal)
-
-    def update_history(chatbot_output, history, user, conv_id):
-        if user and conv_id: users_db[user]["conversations"][conv_id]["history"] = chatbot_output
-        return chatbot_output
-
-    send.click(send_message, [message, chatbot_history, current_user_id, current_conversation, current_user], [chatbot, chatbot_history, conversation_title]).then(update_history, [chatbot, chatbot_history, current_user, current_conversation], chatbot_history).then(lambda username, conv_id: users_db[username]["conversations"][conv_id].get("title", "创建新的聊天") if username and conv_id else "创建新的聊天", [current_user, current_conversation], conversation_title).then(update_title_display, [conversation_title], title_display).then(lambda: "", None, message)
-    message.submit(send_message, [message, chatbot_history, current_user_id, current_conversation, current_user], [chatbot, chatbot_history, conversation_title]).then(update_history, [chatbot, chatbot_history, current_user, current_conversation], chatbot_history).then(lambda username, conv_id: users_db[username]["conversations"][conv_id].get("title", "创建新的聊天") if username and conv_id else "创建新的聊天", [current_user, current_conversation], conversation_title).then(update_title_display, [conversation_title], title_display).then(lambda: "", None, message)
-
 if __name__ == "__main__":
-    # 【重点修正】加上 .queue() 解决 ValueError
-    demo.queue().launch(server_name="0.0.0.0", server_port=7860)
+    logger.info(f"Start the server on port {Config.PORT}")
+    uvicorn.run(app, host=Config.HOST, port=Config.PORT)
