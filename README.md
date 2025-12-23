@@ -4,9 +4,8 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Stars](https://img.shields.io/github/stars/你的ID/仓库名?style=social)
 # 《黄帝外经》智能问答系统
-**这是一个入门级的agentic_rag项目，非常适合新手来了解rag和agent的原理及应用，
-并且实现了端到端的应用，帮助新手发布第一个属于自己的rag网页，对于刚入门的新手很友好**
-一个基于RAG（Retrieval-Augmented Generation）技术的中医古籍智能问答系统，支持《黄帝外经》的原文检索、白话翻译和专家解读。
+- **这是一个入门级的agentic_rag项目，非常适合新手来了解rag和agent的原理及应用，并且实现了端到端的应用，帮助新手发布第一个属于自己的rag网页，对于刚入门的新手很友好**
+- 一个基于RAG（Retrieval-Augmented Generation）技术的中医古籍智能问答系统，支持《黄帝外经》的原文检索、白话翻译和专家解读。
 <p align="center">
   <img src="png/1.png" width="100%"/>
 </p>
