@@ -6,6 +6,7 @@
 # 《黄帝外经》智能问答系统
 - **这是一个入门级的agentic_rag项目，非常适合新手来了解rag和agent的原理及应用，并且实现了端到端的应用，帮助新手发布第一个属于自己的rag网页，对于刚入门的新手很友好**
 - 一个基于RAG（Retrieval-Augmented Generation）技术的中医古籍智能问答系统，支持《黄帝外经》的原文检索、白话翻译和专家解读。
+- 并提供两种快速开始方式，可以实现**docker的一键部署**，或手动进行配置。
 <p align="center">
   <img src="png/1.png" width="100%"/>
 </p>
@@ -147,7 +148,7 @@ DB_URI=postgresql://username:password@localhost:5432/database_name
 docker compose up --build -d
 ```
 
-### 创建用户表（只做一次
+### 创建用户表（只做一次）
 
 ```bash
 docker exec -it tcm_rag_db psql -U postgres -d tcm_db -c "CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password_hash TEXT NOT NULL);"
