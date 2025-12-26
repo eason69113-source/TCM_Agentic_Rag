@@ -47,7 +47,7 @@ graph TD
 - **save_db.py**: 构建FAISS向量数据库
 - **config.py**: 系统配置管理
 
-## 🚀 快速开始
+## 🚀 快速开始（手动配置）
 
 ### 环境准备
 
@@ -108,6 +108,56 @@ python main.py
 python webUI.py
 # 访问 http://localhost:7860 使用Web界面
 ```
+
+## 🚀 快速开始（docker管理）
+
+### 环境准备
+
+```bash
+# 克隆项目
+git clone https://github.com/eason69113-source/TCM_Agentic_Rag.git
+cd TCM_Agentic_Rag
+```
+
+### 配置环境变量
+
+创建或进入 `.env` 文件并配置以下参数：
+
+```env
+DASHSCOPE_API_KEY=your_dashscope_api_key
+DASHSCOPE_API_URL=https://dashscope.aliyuncs.com/api/v1
+ZHIPUAI_API_KEY=your_zhipuai_api_key
+ZHIPUAI_API_URL=https://open.bigmodel.cn/api/paas/v4
+DB_URI=postgresql://username:password@localhost:5432/database_name
+```
+
+进入`docker-compose.yml`文件并配置以下参数：
+
+```environment
+DASHSCOPE_API_KEY=your_dashscope_api_key
+DASHSCOPE_API_URL=https://dashscope.aliyuncs.com/api/v1
+ZHIPUAI_API_KEY=your_zhipuai_api_key
+ZHIPUAI_API_URL=https://open.bigmodel.cn/api/paas/v4
+DB_URI=postgresql://username:password@localhost:5432/database_name
+```
+
+### 启动系统
+
+```bash
+docker compose up --build -d
+```
+
+### 创建用户表（只做一次
+
+```bash
+docker exec -it tcm_rag_db psql -U postgres -d tcm_db -c "CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password_hash TEXT NOT NULL);"
+```
+
+### 使用系统
+
+- 打开浏览器：http://localhost:7860
+- 注册账号 → 登录 → 开始提问《黄帝外经》相关问题
+- 右上角“退出登录”可退出
 
 ## 📖 使用说明
 
