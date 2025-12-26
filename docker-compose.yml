@@ -1,0 +1,41 @@
+
+services:
+  app:
+    build: .
+    container_name: tcm_rag_app
+    ports:
+      - "8000:8000"   # FastAPI 接口
+      - "7860:7860"   # Gradio Web UI
+    volumes:
+      - .:/app        # 挂载代码，便于开发时修改实时生效
+      - ./.env:/app/.env   # 新加这一行
+    environment:
+      - DASHSCOPE_API_KEY="sk-5ae0c45a926243c8879d712f802a4d3f"
+      - DASHSCOPE_API_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+      - ZHIPUAI_API_KEY="35a92221a40b423fb6a123bc08df1789.zbscxlOUbbJZgFHk"
+      - ZHIPUAI_API_URL="https://open.bigmodel.cn/api/paas/v4/"
+      - DB_URI=postgresql://postgres:postgres@db:5432/tcm_db
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "uvicorn main:app --host 0.0.0.0 --port 8000 & python webUI.py"
+
+  db:
+    image: ankane/pgvector:latest  
+    container_name: tcm_rag_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tcm_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:   # 新增健康检查
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
